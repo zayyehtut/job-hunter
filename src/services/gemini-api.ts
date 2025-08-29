@@ -1,59 +1,75 @@
 import type { JobAIData, GeminiRequest, GeminiResponse } from "~/types"
-import { CONFIG, SYSTEM_INSTRUCTION, JOB_ANALYSIS_SCHEMA } from "~/config/constants"
-import { validateAIResponse } from "~/utils"
+import type { BaseAgent, AgentExecutionResult } from "~/types/agents"
+import { CONFIG } from "~/config/constants"
+import { getAgent } from "~/agents"
 
 /**
- * Gemini API client for job analysis
+ * Gemini API client for AI processing
+ * Now supports agent-based architecture for extensibility
  */
 export class GeminiAPIClient {
   /**
-   * Process job data using Gemini AI
+   * Execute an agent with the given input
+   */
+  static async executeAgent<TInput, TOutput>(
+    agentName: string,
+    input: TInput,
+    apiKey: string
+  ): Promise<AgentExecutionResult<TOutput>> {
+    const startTime = Date.now()
+    
+    try {
+      // Get the agent
+      const agent = getAgent(agentName) as BaseAgent<TInput, TOutput>
+      
+      // Validate input
+      if (!agent.validateInput(input)) {
+        throw new Error(`Invalid input for agent '${agentName}'`)
+      }
+
+      // Create request using the agent
+      const requestBody = agent.createRequest(input)
+
+      // Make API call
+      const response = await this.makeAPICall(apiKey, agent.model, requestBody)
+      
+      // Process response using the agent
+      const result = await response.json()
+      const data = agent.processResponse(result)
+      
+      return {
+        success: true,
+        data,
+        agentName,
+        executionTime: Date.now() - startTime
+      }
+    } catch (error) {
+      console.error(`Agent execution error (${agentName}):`, error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        agentName,
+        executionTime: Date.now() - startTime
+      }
+    }
+  }
+
+  /**
+   * Process job data using the job extraction agent
+   * @deprecated Use executeAgent('job-extraction', input, apiKey) instead
    */
   static async processJobData(
     jobData: { content: string; url: string },
     apiKey: string,
     modelName: string = CONFIG.DEFAULT_MODEL_NAME
   ): Promise<JobAIData> {
-    try {
-      // Validate inputs
-      if (!apiKey) {
-        throw new Error('API Key is required')
-      }
-      
-      if (!jobData.content || !jobData.url) {
-        throw new Error('Job content and URL are required')
-      }
-
-      // Prepare the API request
-      const requestBody: GeminiRequest = {
-        contents: [{
-          role: 'user',
-          parts: [{
-            text: jobData.content
-          }]
-        }],
-        systemInstruction: {
-          parts: [{
-            text: SYSTEM_INSTRUCTION
-          }]
-        },
-        generationConfig: {
-          ...CONFIG.GENERATION_CONFIG,
-          responseSchema: JOB_ANALYSIS_SCHEMA
-        }
-      }
-
-      // Make API call
-      const response = await this.makeAPICall(apiKey, modelName, requestBody)
-      
-      // Process and validate response
-      const aiData = await this.processAPIResponse(response)
-      
-      return aiData
-    } catch (error) {
-      console.error('Gemini API processing error:', error)
-      throw error
+    const result = await this.executeAgent('job-extraction', jobData, apiKey)
+    
+    if (!result.success) {
+      throw new Error(result.error || 'Job processing failed')
     }
+    
+    return result.data as JobAIData
   }
 
   /**
@@ -83,39 +99,10 @@ export class GeminiAPIClient {
   }
 
   /**
-   * Process and validate the API response
-   */
-  private static async processAPIResponse(response: Response): Promise<JobAIData> {
-    const result: GeminiResponse = await response.json()
-
-    // Validate response structure
-    if (!result.candidates || !result.candidates[0] || !result.candidates[0].content) {
-      throw new Error('Invalid response structure from Gemini API')
-    }
-
-    const aiResponseText = result.candidates[0].content.parts[0].text
-
-    // Parse JSON response
-    let aiData: JobAIData
-    try {
-      aiData = JSON.parse(aiResponseText)
-    } catch (parseError) {
-      console.error('JSON parse error:', parseError)
-      console.error('AI Response:', aiResponseText)
-      throw new Error('Failed to parse AI response as JSON')
-    }
-
-    // Basic validation of required fields
-    validateAIResponse(aiData)
-
-    return aiData
-  }
-
-  /**
    * Test API connection with a simple request
    */
   static async testConnection(
-    apiKey: string, 
+    apiKey: string,
     modelName: string = CONFIG.DEFAULT_MODEL_NAME
   ): Promise<boolean> {
     try {
@@ -150,7 +137,7 @@ export class GeminiAPIClient {
 
       const response = await this.makeAPICall(apiKey, modelName, testRequestBody)
       const result: GeminiResponse = await response.json()
-      
+
       return !!(result.candidates && result.candidates[0])
     } catch (error) {
       console.error('API connection test failed:', error)
